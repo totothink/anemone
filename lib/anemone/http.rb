@@ -110,7 +110,10 @@ module Anemone
           # request url
           loc = url.merge(loc) if loc.relative?
 
-          response, response_time = get_response(loc, referer)
+          options = gen_options(referer)
+
+          response, response_time = robust_get_response_with_time(loc, options)
+          @cookie_store.merge!(response['Set-Cookie']) if accept_cookies?
           code = Integer(response.code)
           redirect_to = response.is_a?(Net::HTTPRedirection) ? URI(response['location']).normalize : nil
           yield response, code, loc, redirect_to, response_time
@@ -118,35 +121,38 @@ module Anemone
       end while (loc = redirect_to) && allowed?(redirect_to, url) && limit > 0
     end
 
-    #
-    # Get an HTTPResponse for *url*, sending the appropriate User-Agent string
-    #
-    def get_response(url, referer = nil)
+    def get_response(url,opts={})
       full_path = url.query.nil? ? url.path : "#{url.path}?#{url.query}"
+      req = Net::HTTP::Get.new(full_path, opts)
+      req.basic_auth url.user, url.password if url.user
+      connection(url).request(req)
+    end
 
-      opts = {}
-      opts['User-Agent'] = user_agent if user_agent
-      opts['Referer'] = referer.to_s if referer
-      opts['Cookie'] = @cookie_store.to_s unless @cookie_store.empty? || (!accept_cookies? && @opts[:cookies].nil?)
+    def get_response_with_time(url,opts={})
+      start = Time.now()
+      response = get_response(url,opts={})
+      response_time = ((finish - start) * 1000).round
+      return response, response_time
+    end
 
+    def robust_get_response_with_time(url,opts={})
       retries = 0
       begin
-        start = Time.now()
-        # format request
-        req = Net::HTTP::Get.new(full_path, opts)
-        # HTTP Basic authentication
-        req.basic_auth url.user, url.password if url.user
-        response = connection(url).request(req)
-        finish = Time.now()
-        response_time = ((finish - start) * 1000).round
-        @cookie_store.merge!(response['Set-Cookie']) if accept_cookies?
-        return response, response_time
+        get_response_with_time(url,opts)
       rescue Timeout::Error, Net::HTTPBadResponse, EOFError => e
         puts e.inspect if verbose?
         refresh_connection(url)
         retries += 1
-        retry unless retries > 3
+        retry unless retries > 3        
       end
+    end
+
+    def gen_options(referer)
+      opts = {}
+      opts['User-Agent'] = user_agent if user_agent
+      opts['Referer'] = referer.to_s if referer
+      opts['Cookie'] = @cookie_store.to_s unless @cookie_store.empty? || (!accept_cookies? && @opts[:cookies].nil?)
+      opts
     end
 
     def connection(url)
